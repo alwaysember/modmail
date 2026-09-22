@@ -1,30 +1,4 @@
-import asyncio
-import discord
-from discord import app_commands
-from discord.ext import commands
-
-BOT_TOKEN = "MTU1MDk1NTkxMDc0OTQ5NTM4Ng.GX0pge.k0kzRSCSZvhtnQCFyoA3mrh1yiqgH-bW8PqiBc"
-GUILD_ID = 1550955234036293764
-WAITING_CATEGORY_ID = 1550955234585608231
-
-CATEGORY_IDS = {
-    "Admin Support": 1550955234585608226,
-    "Moderation Support": 1550955234585608228,
-    "General Support": 1550955234585608229,
-    "Monitoring Council": 1550955234585608230,
-}
-
-URGENT_PING_USERS = [1405182893579305121, 1289315440392405008]
-HIGH_PING_USERS = [1301968456014495787]
-
-AUTO_REPLIES = {
-    "welcome": "Hello! Thank you for contacting support. How can we assist you today?",
-    "info": "Please provide your username, user ID, and a detailed description of your issue.",
-    "patience": "Our staff team is currently reviewing your ticket. Thank you for your patience!"
-}
-
-intents = discord.Intents.default()
-intents.messages = True
+rdfgs
 intents.message_content = True
 intents.dm_messages = True
 
