@@ -1,0 +1,472 @@
+import asyncio
+import discord
+from discord import app_commands
+from discord.ext import commands
+
+BOT_TOKEN = "MTU1MDk1NTkxMDc0OTQ5NTM4Ng.GX0pge.k0kzRSCSZvhtnQCFyoA3mrh1yiqgH-bW8PqiBc"
+GUILD_ID = 1550955234036293764
+WAITING_CATEGORY_ID = 1550955234585608231
+
+CATEGORY_IDS = {
+    "Admin Support": 1550955234585608226,
+    "Moderation Support": 1550955234585608228,
+    "General Support": 1550955234585608229,
+    "Monitoring Council": 1550955234585608230,
+}
+
+URGENT_PING_USERS = [1405182893579305121, 1289315440392405008]
+HIGH_PING_USERS = [1301968456014495787]
+
+AUTO_REPLIES = {
+    "welcome": "Hello! Thank you for contacting support. How can we assist you today?",
+    "info": "Please provide your username, user ID, and a detailed description of your issue.",
+    "patience": "Our staff team is currently reviewing your ticket. Thank you for your patience!"
+}
+
+intents = discord.Intents.default()
+intents.messages = True
+intents.message_content = True
+intents.dm_messages = True
+
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+active_tickets = {}
+scheduled_closes = {}
+ticket_priorities = {}
+
+
+async def log_command(interaction: discord.Interaction, action_text: str):
+    guild = interaction.guild
+    if not guild:
+        return
+    log_channel = discord.utils.get(guild.text_channels, name="command_logs")
+    if log_channel:
+        await log_channel.send(f"log: user `{interaction.user}` executed `{action_text}` in `{interaction.channel}`")
+
+
+async def apply_priority_logic(channel: discord.TextChannel, priority_level: str, interaction: discord.Interaction = None):
+    ticket_priorities[channel.id] = priority_level
+    clean_name = channel.name.replace("urgent-", "").replace("high-", "").replace("medium-", "")
+
+    if priority_level == "Urgent":
+        pings = " ".join([f"<@{u_id}>" for u_id in URGENT_PING_USERS])
+        await channel.edit(name=f"urgent-{clean_name}")
+        await channel.send(f"**URGENT TICKET ALERT** {pings}")
+
+    elif priority_level == "High":
+        pings = " ".join([f"<@{u_id}>" for u_id in HIGH_PING_USERS])
+        await channel.edit(name=f"high-{clean_name}")
+        await channel.send(f"**HIGH PRIORITY TICKET ALERT** {pings}")
+
+    elif priority_level == "Medium":
+        await channel.edit(name=f"medium-{clean_name}")
+
+    elif priority_level == "Low":
+        await channel.edit(name=clean_name)
+
+    if interaction:
+        await log_command(interaction, f"set priority to {priority_level}")
+
+
+class PrioritySelectView(discord.ui.View):
+    def __init__(self, target_user: discord.User):
+        super().__init__(timeout=60)
+        self.target_user = target_user
+
+    async def apply_priority(self, interaction: discord.Interaction, priority_level: str):
+        channel = interaction.channel
+        if not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message("invalid channel.", ephemeral=True)
+            return
+
+        await apply_priority_logic(channel, priority_level, interaction)
+        await interaction.response.send_message(f"set priority to **{priority_level}**.", ephemeral=True)
+
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
+        await interaction.edit_original_response(view=self)
+
+    @discord.ui.button(label="Low Priority", style=discord.ButtonStyle.secondary)
+    async def low_prio(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.apply_priority(interaction, "Low")
+
+    @discord.ui.button(label="Medium Priority", style=discord.ButtonStyle.primary)
+    async def medium_prio(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.apply_priority(interaction, "Medium")
+
+    @discord.ui.button(label="High Priority", style=discord.ButtonStyle.danger)
+    async def high_prio(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.apply_priority(interaction, "High")
+
+    @discord.ui.button(label="Urgent Priority", style=discord.ButtonStyle.danger)
+    async def urgent_prio(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.apply_priority(interaction, "Urgent")
+
+
+class InitialCategorySelectView(discord.ui.View):
+    def __init__(self, target_user: discord.User):
+        super().__init__(timeout=None)
+        self.target_user = target_user
+
+    async def update_category(self, interaction: discord.Interaction, category_name: str):
+        status_text = f"ticket routed to **{category_name}** by {interaction.user.display_name}"
+        
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
+
+        target_category_id = CATEGORY_IDS.get(category_name)
+        if target_category_id and interaction.guild:
+            target_category = interaction.guild.get_channel(target_category_id) or await interaction.guild.fetch_channel(target_category_id)
+            if target_category and isinstance(interaction.channel, discord.TextChannel):
+                await interaction.channel.edit(category=target_category)
+
+        await interaction.response.edit_message(content=status_text, view=self)
+        await log_command(interaction, f"routed ticket to category {category_name}")
+
+        prio_view = PrioritySelectView(target_user=self.target_user)
+        await interaction.followup.send(
+            "please select the priority level for this ticket:",
+            view=prio_view,
+            ephemeral=True
+        )
+
+    @discord.ui.button(label="Admin Support", style=discord.ButtonStyle.secondary)
+    async def admin_support(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.update_category(interaction, "Admin Support")
+
+    @discord.ui.button(label="Moderation Support", style=discord.ButtonStyle.secondary)
+    async def mod_support(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.update_category(interaction, "Moderation Support")
+
+    @discord.ui.button(label="General Support", style=discord.ButtonStyle.secondary)
+    async def general_support(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.update_category(interaction, "General Support")
+
+    @discord.ui.button(label="Monitoring Council", style=discord.ButtonStyle.secondary)
+    async def monitoring_council(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.update_category(interaction, "Monitoring Council")
+
+
+@bot.event
+async def on_ready():
+    guild = discord.Object(id=GUILD_ID)
+    bot.tree.copy_global_to(guild=guild)
+    await bot.tree.sync(guild=guild)
+    print(f"modmail bot logged in as {bot.user} and synced slash commands.")
+
+
+def get_user_id_from_channel(channel_id: int):
+    for u_id, c_id in active_tickets.items():
+        if c_id == channel_id:
+            return u_id
+    return None
+
+
+@bot.tree.command(name="autoreply", description="Send a pre-written auto-reply to the user.")
+@app_commands.choices(preset=[
+    app_commands.Choice(name="Welcome Greeting", value="welcome"),
+    app_commands.Choice(name="Request More Information", value="info"),
+    app_commands.Choice(name="Patience Notice", value="patience")
+])
+async def autoreply(interaction: discord.Interaction, preset: str):
+    target_user_id = get_user_id_from_channel(interaction.channel_id)
+    if not target_user_id:
+        await interaction.response.send_message("this command can only be used in an active ticket channel.", ephemeral=True)
+        return
+
+    text = AUTO_REPLIES.get(preset, "no pre-written response found.")
+    user = bot.get_user(target_user_id) or await bot.fetch_user(target_user_id)
+    
+    embed = discord.Embed(title="Support Message", description=text, color=discord.Color.blue())
+    await user.send(embed=embed)
+    await interaction.response.send_message(embed=discord.Embed(description=f"**Auto-Reply Sent:** {text}", color=discord.Color.blue()))
+    await log_command(interaction, f"/autoreply preset={preset}")
+
+
+@bot.tree.command(name="close", description="Close this ticket, optionally after a delay.")
+@app_commands.describe(delay_seconds="Delay in seconds before closing (optional).")
+async def close_ticket(interaction: discord.Interaction, delay_seconds: int = 0):
+    target_user_id = get_user_id_from_channel(interaction.channel_id)
+    channel_id = interaction.channel_id
+
+    async def do_close():
+        if delay_seconds > 0:
+            await asyncio.sleep(delay_seconds)
+        if target_user_id and target_user_id in active_tickets:
+            del active_tickets[target_user_id]
+        if channel_id in scheduled_closes:
+            del scheduled_closes[channel_id]
+        if channel_id in ticket_priorities:
+            del ticket_priorities[channel_id]
+        await interaction.channel.delete(reason="modmail ticket closed.")
+
+    await log_command(interaction, f"/close delay_seconds={delay_seconds}")
+
+    if delay_seconds > 0:
+        task = asyncio.create_task(do_close())
+        scheduled_closes[channel_id] = task
+        await interaction.response.send_message(f"ticket scheduled to close in {delay_seconds} seconds. use `/cancelclose` to cancel.")
+    else:
+        await interaction.response.send_message("closing ticket channel...")
+        await do_close()
+
+
+@bot.tree.command(name="cancelclose", description="Cancel a scheduled close.")
+async def cancelclose(interaction: discord.Interaction):
+    channel_id = interaction.channel_id
+    if channel_id in scheduled_closes:
+        scheduled_closes[channel_id].cancel()
+        del scheduled_closes[channel_id]
+        await interaction.response.send_message("scheduled close has been cancelled.")
+        await log_command(interaction, "/cancelclose")
+    else:
+        await interaction.response.send_message("there is no scheduled close for this channel.", ephemeral=True)
+
+
+@bot.tree.command(name="move", description="Move this ticket to a different department.")
+@app_commands.choices(department=[
+    app_commands.Choice(name="Admin Support", value="Admin Support"),
+    app_commands.Choice(name="Moderation Support", value="Moderation Support"),
+    app_commands.Choice(name="General Support", value="General Support"),
+    app_commands.Choice(name="Monitoring Council", value="Monitoring Council")
+])
+async def move(interaction: discord.Interaction, department: str):
+    target_category_id = CATEGORY_IDS.get(department)
+    if not target_category_id:
+        await interaction.response.send_message("invalid department specified.", ephemeral=True)
+        return
+
+    guild = interaction.guild
+    category = guild.get_channel(target_category_id) or await guild.fetch_channel(target_category_id)
+    if isinstance(interaction.channel, discord.TextChannel) and category:
+        await interaction.channel.edit(category=category)
+        await interaction.response.send_message(f"moved ticket channel to **{department}**.")
+        await log_command(interaction, f"/move department={department}")
+
+
+@bot.tree.command(name="openreply", description="Reply to the user showing your name.")
+@app_commands.describe(message="The message to send to the user with your staff name.")
+async def openreply(interaction: discord.Interaction, message: str):
+    target_user_id = get_user_id_from_channel(interaction.channel_id)
+    if not target_user_id:
+        await interaction.response.send_message("this command can only be used in an active ticket channel.", ephemeral=True)
+        return
+
+    user = bot.get_user(target_user_id) or await bot.fetch_user(target_user_id)
+    embed = discord.Embed(
+        title=f"Message from {interaction.user.display_name}",
+        description=message,
+        color=discord.Color.green()
+    )
+    embed.set_author(name=interaction.user.name, icon_url=interaction.user.display_avatar.url)
+    await user.send(embed=embed)
+    
+    confirm_embed = discord.Embed(description=f"**Open Reply Sent ({interaction.user.name}):** {message}", color=discord.Color.green())
+    await interaction.response.send_message(embed=confirm_embed)
+    await log_command(interaction, f"/openreply message={message}")
+
+
+@bot.tree.command(name="openticket", description="Open a ModMail ticket with any user via User ID.")
+@app_commands.describe(user_id="The Discord User ID of the person to open a ticket for.")
+async def openticket(interaction: discord.Interaction, user_id: str):
+    try:
+        target_id = int(user_id.strip())
+    except ValueError:
+        await interaction.response.send_message("invalid user ID format. please provide a numeric user ID.", ephemeral=True)
+        return
+
+    if target_id in active_tickets:
+        await interaction.response.send_message(f"a ticket already exists for user ID `{target_id}`.", ephemeral=True)
+        return
+
+    await interaction.response.defer()
+
+    try:
+        user = bot.get_user(target_id) or await bot.fetch_user(target_id)
+    except discord.NotFound:
+        await interaction.followup.send(f"user with ID `{target_id}` was not found on discord.", ephemeral=True)
+        return
+    except Exception as e:
+        await interaction.followup.send(f"failed to fetch user `{target_id}`: `{e}`", ephemeral=True)
+        return
+
+    guild = interaction.guild
+    category = guild.get_channel(WAITING_CATEGORY_ID) or await guild.fetch_channel(WAITING_CATEGORY_ID)
+    
+    channel_name = f"ticket-{user.name}"
+    channel = await guild.create_text_channel(
+        name=channel_name,
+        category=category,
+        topic=f"ModMail ticket for {user} (ID: {user.id})"
+    )
+    active_tickets[user.id] = channel.id
+
+    dm_status = "successfully sent notification DM to the user."
+    try:
+        dm_embed = discord.Embed(
+            title="Ticket Opened",
+            description="A support ticket has been opened for you by staff. Reply directly to this DM to speak with us.",
+            color=discord.Color.blue()
+        )
+        await user.send(embed=dm_embed)
+    except discord.Forbidden:
+        dm_status = "warning: could not DM the user (DMs are closed or they share no servers with the bot)."
+    except Exception as e:
+        dm_status = f"warning: failed to send DM (`{e}`)."
+
+    await interaction.followup.send(f"opened ticket channel for **{user.name}** ({user.id}): {channel.mention}\n{dm_status}")
+    await log_command(interaction, f"/openticket user_id={user_id}")
+
+
+@bot.tree.command(name="priority", description="Set ticket priority.")
+@app_commands.choices(level=[
+    app_commands.Choice(name="Low", value="Low"),
+    app_commands.Choice(name="Medium", value="Medium"),
+    app_commands.Choice(name="High", value="High"),
+    app_commands.Choice(name="Urgent", value="Urgent")
+])
+async def priority(interaction: discord.Interaction, level: str):
+    if not get_user_id_from_channel(interaction.channel_id):
+        await interaction.response.send_message("this command can only be used in an active ticket channel.", ephemeral=True)
+        return
+
+    if isinstance(interaction.channel, discord.TextChannel):
+        await apply_priority_logic(interaction.channel, level, interaction)
+        await interaction.response.send_message(f"ticket priority set to **{level}**.")
+
+
+@bot.tree.command(name="reply", description="Reply anonymously as the support team.")
+@app_commands.describe(message="The message to send anonymously.")
+async def reply(interaction: discord.Interaction, message: str):
+    target_user_id = get_user_id_from_channel(interaction.channel_id)
+    if not target_user_id:
+        await interaction.response.send_message("this command can only be used in an active ticket channel.", ephemeral=True)
+        return
+
+    user = bot.get_user(target_user_id) or await bot.fetch_user(target_user_id)
+    embed = discord.Embed(title="Support Team Message", description=message, color=discord.Color.green())
+    await user.send(embed=embed)
+
+    confirm_embed = discord.Embed(description=f"**Anonymous Reply Sent:** {message}", color=discord.Color.green())
+    await interaction.response.send_message(embed=confirm_embed)
+    await log_command(interaction, f"/reply message={message}")
+
+
+@bot.tree.command(name="tickets", description="List all open tickets.")
+async def tickets(interaction: discord.Interaction):
+    if not active_tickets:
+        await interaction.response.send_message("no open tickets found.")
+        return
+
+    description_lines = []
+    for u_id, c_id in active_tickets.items():
+        ch = interaction.guild.get_channel(c_id)
+        ch_mention = ch.mention if ch else f"channel ID: {c_id}"
+        prio = ticket_priorities.get(c_id, "Normal")
+        description_lines.append(f"• user ID `{u_id}` — {ch_mention} | priority: **{prio}**")
+
+    embed = discord.Embed(
+        title="Open ModMail Tickets",
+        description="\n".join(description_lines),
+        color=discord.Color.gold()
+    )
+    await interaction.response.send_message(embed=embed)
+    await log_command(interaction, "/tickets")
+
+
+@bot.tree.command(name="ticketsinfo", description="Show all tickets for a user.")
+@app_commands.describe(user_id="The User ID to view ticket info for.")
+async def ticketsinfo(interaction: discord.Interaction, user_id: str):
+    try:
+        target_id = int(user_id.strip())
+    except ValueError:
+        await interaction.response.send_message("invalid user ID.", ephemeral=True)
+        return
+
+    channel_id = active_tickets.get(target_id)
+    if not channel_id:
+        await interaction.response.send_message(f"no active tickets found for user ID `{target_id}`.", ephemeral=True)
+        return
+
+    user = bot.get_user(target_id) or await bot.fetch_user(target_id)
+    channel = interaction.guild.get_channel(channel_id)
+    prio = ticket_priorities.get(channel_id, "Normal")
+
+    embed = discord.Embed(title=f"Ticket Info — {user.name}", color=discord.Color.blue())
+    embed.add_field(name="User ID", value=str(user.id), inline=True)
+    embed.add_field(name="Channel", value=channel.mention if channel else "unknown", inline=True)
+    embed.add_field(name="Priority", value=prio, inline=True)
+    await interaction.response.send_message(embed=embed)
+    await log_command(interaction, f"/ticketsinfo user_id={user_id}")
+
+
+@bot.event
+async def on_message(message: discord.Message):
+    if message.author == bot.user:
+        return
+
+    if isinstance(message.channel, discord.DMChannel):
+
+        guild = bot.get_guild(GUILD_ID) or await bot.fetch_guild(GUILD_ID)
+        if not guild:
+            return
+
+        user_id = message.author.id
+        staff_channel = None
+        is_first_message = False
+
+        if user_id in active_tickets:
+            staff_channel = guild.get_channel(active_tickets[user_id])
+
+        if not staff_channel:
+            is_first_message = True
+            category = guild.get_channel(WAITING_CATEGORY_ID) or await guild.fetch_channel(WAITING_CATEGORY_ID)
+            channel_name = f"ticket-{message.author.name}"
+            
+            staff_channel = await guild.create_text_channel(
+                name=channel_name,
+                category=category,
+                topic=f"ModMail ticket for {message.author} (ID: {user_id})"
+            )
+            active_tickets[user_id] = staff_channel.id
+
+            user_embed = discord.Embed(
+                title="ModMail Received",
+                description=(
+                    "Hello, a staff member will be with you in a bit. "
+                    "While waiting, do you mind explaining in as much detail "
+                    "what your issue or question is?"
+                ),
+                color=discord.Color.blue()
+            )
+            await message.channel.send(embed=user_embed)
+
+        timestamp_str = message.created_at.strftime("%m/%d/%Y %I:%M %p")
+        
+        staff_embed = discord.Embed(
+            description=f"{message.content}\n\n`{timestamp_str}`" if message.content else f"`{timestamp_str}`",
+            color=discord.Color.blue()
+        )
+        staff_embed.set_author(
+            name=message.author.name,
+            icon_url=message.author.display_avatar.url
+        )
+
+        if message.attachments:
+            if message.attachments[0].content_type and message.attachments[0].content_type.startswith("image/"):
+                staff_embed.set_image(url=message.attachments[0].url)
+            else:
+                attachment_urls = "\n".join([att.url for att in message.attachments])
+                staff_embed.add_field(name="Attachments", value=attachment_urls, inline=False)
+
+        if is_first_message:
+            view = InitialCategorySelectView(target_user=message.author)
+            await staff_channel.send(embed=staff_embed, view=view)
+        else:
+            await staff_channel.send(embed=staff_embed)
+
+    await bot.process_commands(message)
+
+bot.run(BOT_TOKEN)
